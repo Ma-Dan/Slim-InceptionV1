@@ -53,8 +53,12 @@ import time
 slim = tf.contrib.slim
 from tensorflow.contrib.slim.python.slim.nets import inception_v1
 
+tf.app.flags.DEFINE_string("ps_hosts", "", "Comma-separated list of hostname:port pairs")
+tf.app.flags.DEFINE_string("worker_hosts", "", "Comma-separated list of hostname:port pairs")
+tf.app.flags.DEFINE_string("job_name", "", "One of 'ps', 'worker'")
+tf.app.flags.DEFINE_integer("task_index", 0, "Index of task within the job")
+
 FLAGS = tf.flags.FLAGS
-tf.flags.DEFINE_string('checkpointDir', './model', 'modeloutput')
 
 def inception_v1_arg_scope(weight_decay=0.00004,
                            use_batch_norm=True,
@@ -107,27 +111,66 @@ def inception_v1_arg_scope(weight_decay=0.00004,
 
 
 def trainmodel(train_batch, train_label_batch, train_label, num_epochs):
-    with slim.arg_scope(inception_v1_arg_scope()):
-        train_logits, end_points = inception_v1.inception_v1(train_batch, num_classes=2, is_training=True)
+    ps_hosts = FLAGS.ps_hosts.split(",")
+    worker_hosts = FLAGS.worker_hosts.split(",")
 
-    tf.losses.sparse_softmax_cross_entropy(labels=train_label, logits=train_logits)
-    total_loss = tf.losses.get_total_loss()
-    global_step = tf.Variable(0, name='global_step', trainable=False)
+    # Create a cluster from the parameter server and worker hosts.
+    cluster = tf.train.ClusterSpec({"ps": ps_hosts, "worker": worker_hosts})
 
-    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-    with tf.control_dependencies(update_ops):
-        optimizer = tf.train.AdamOptimizer(learning_rate=0.001)
-        train_op = optimizer.minimize(total_loss, global_step=global_step)
+    # Create and start a server for the local task.
+    config = tf.ConfigProto()
+    config.gpu_options.per_process_gpu_memory_fraction = 0.4
 
-    prediction_labels = tf.argmax(end_points['Predictions'], 1)
-    read_labels = tf.argmax(train_label_batch, 1)
-    correct_prediction = tf.equal(prediction_labels, read_labels)
-    train_accuracy_batch = tf.reduce_mean(tf.cast(correct_prediction, "float"))
+    server = tf.train.Server(cluster,
+                             job_name=FLAGS.job_name,
+                             task_index=FLAGS.task_index,
+                             config = config)
+    print("Cluster job: %s, task_index: %d, target: %s" % (FLAGS.job_name, FLAGS.task_index, server.target))
+    if FLAGS.job_name == "ps":
+        server.join()
+    elif FLAGS.job_name == "worker":
+        # Assigns ops to the local worker by default.
+        with tf.device(tf.train.replica_device_setter(worker_device="/job:worker/task:%d" % FLAGS.task_index, cluster=cluster)):
+            with slim.arg_scope(inception_v1_arg_scope()):
+                train_logits, end_points = inception_v1.inception_v1(train_batch, num_classes=2, is_training=True)
 
-    saver = tf.train.Saver(tf.trainable_variables() + tf.get_collection_ref("moving_vars"))
+            tf.losses.sparse_softmax_cross_entropy(labels=train_label, logits=train_logits)
+            total_loss = tf.losses.get_total_loss()
+            global_step = tf.Variable(0, name='global_step', trainable=False)
 
-    with tf.Session() as sess:
-        sess.run(tf.group(tf.global_variables_initializer(), tf.local_variables_initializer()))
+            update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+            with tf.control_dependencies(update_ops):
+                optimizer = tf.train.AdamOptimizer(learning_rate=0.001)
+                train_op = optimizer.minimize(total_loss, global_step=global_step)
+
+            prediction_labels = tf.argmax(end_points['Predictions'], 1)
+            read_labels = tf.argmax(train_label_batch, 1)
+            correct_prediction = tf.equal(prediction_labels, read_labels)
+            train_accuracy_batch = tf.reduce_mean(tf.cast(correct_prediction, "float"))
+
+            saver = tf.train.Saver(tf.trainable_variables() + tf.get_collection_ref("moving_vars"))
+            #init_op = tf.global_variables_initializer()
+            local_init_op = tf.global_variables_initializer()
+
+        # Create a "Supervisor", which oversees the training process.
+        sv = tf.train.Supervisor(is_chief=(FLAGS.task_index == 0),
+                                 logdir="./tflog",
+                                 #init_op=init_op,
+                                 local_init_op=local_init_op,
+                                 saver = saver,
+                                 global_step=global_step,
+                                 save_model_secs=600)
+
+        # The supervisor takes care of session initialization and restoring from
+        # a checkpoint.
+        config = tf.ConfigProto()
+        config.gpu_options.per_process_gpu_memory_fraction = 0.4
+        #session = tf.Session(config=config, ...)
+        sess = sv.prepare_or_wait_for_session(server.target, config = config)
+
+        # Start queue runners for the input pipelines (if ang).
+        sv.start_queue_runners(sess)
+
         print("Initialized")
 
         step = 0
@@ -141,10 +184,10 @@ def trainmodel(train_batch, train_label_batch, train_label, num_epochs):
             print(end_points2['Predictions'])
             print("Minibatch accuracy: %.6f" % train_acc2_batch)
             #print("lr: %.6f" % optimizer._lr)
-        
+
             step += 1
 
-        saver.save(sess, './train.ckpt')
+        sv.stop()
 
 
 def main(_):

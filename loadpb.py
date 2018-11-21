@@ -19,7 +19,7 @@ def recognize(img_path):
             output = sess.graph.get_tensor_by_name("output:0")
 
             imgfloat = tf.cast(tf.image.decode_jpeg(tf.read_file(img_path), channels=3), dtype=tf.float32)
-            img = tf.subtract(tf.multiply(tf.div(tf.image.resize_images(tf.expand_dims(imgfloat, 0), (224, 224), method=0), 255.0), 2), 1.0)
+            img = tf.image.resize_images(tf.expand_dims(imgfloat, 0), (224, 224))
 
             img_out_softmax = sess.run(output, feed_dict={input:img.eval()})
 

@@ -36,8 +36,9 @@ def ckpt_info(ckpt_file):
 
 def test_network(img_path, label_path):
     x = tf.placeholder("float", shape=[None, 224, 224, 3], name='input')
+    xscale = tf.subtract(tf.multiply(tf.div(x, 255.0), 2), 1.0)
     with slim.arg_scope(inception_v1.inception_v1_arg_scope()):
-        logits, end_points = inception_v1.inception_v1(x, num_classes=1001, dropout_keep_prob=1.0, is_training=False)
+        logits, end_points = inception_v1.inception_v1(xscale, num_classes=1001, dropout_keep_prob=1.0, is_training=False)
     predictions = tf.nn.softmax(logits, name="output")
     saver = tf.train.Saver()
     with tf.Session() as sess:
@@ -56,7 +57,7 @@ def test_network(img_path, label_path):
             f.write(output_graph_def.SerializeToString())
 
         imgfloat = tf.cast(tf.image.decode_jpeg(tf.read_file(img_path), channels=3), dtype=tf.float32)
-        img = tf.subtract(tf.multiply(tf.div(tf.image.resize_images(tf.expand_dims(imgfloat, 0), (224, 224), method=0), 255.0), 2), 1.0)
+        img = tf.image.resize_images(tf.expand_dims(imgfloat, 0), (224, 224), method=0)
         predictions_val = predictions.eval(feed_dict={x: img.eval()})
         predicted_classes = np.argmax(predictions_val, axis=1)
 
